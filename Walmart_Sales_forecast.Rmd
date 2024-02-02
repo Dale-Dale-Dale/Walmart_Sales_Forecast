@@ -1,0 +1,404 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(ggplot2)
+library(gridExtra)
+library(urca)
+library(tseries)
+library(dplyr)# Have to install
+library(rlang)# Have to update
+library(vctrs)# Have to update
+library(zoo)
+library(forecast)
+library(fpp2)
+library(fable)
+library(MASS)
+library(keras)
+```
+
+```{r}
+sales <- read.csv("sales.csv")
+sales <- sales[which(sales["Store"] == 1),]
+sales <- replace(sales, is.na(sales), 0)
+sales <- subset(sales, select = -c(IsHoliday))
+```
+```{r}
+sales.by.depart <- list()
+ts.by.depart <- list()
+for (i in unique(sales["Dept"])$Dept) {
+  sales.by.depart[[i]] <- as.data.frame(sales[which(sales["Dept"] == i),])
+  ts.by.depart[[i]] <- ts(sales.by.depart[[i]], start=c(2010, 6), frequency=52)
+}
+```
+
+
+```{r}
+length(unique(sales["Dept"])$Dept)
+```
+
+```{r}
+features <- read.csv("features.csv")
+features <- features[which(features["Store"] == 1),]
+features <- replace(features, is.na(features), 0)
+features <- subset(features, select = -c(Store, MarkDown1, MarkDown2, MarkDown3, MarkDown4, MarkDown5))
+#features
+```
+```{r}
+features.ts <- ts(features, start=c(2010, 6), frequency=52)
+#features.ts
+```
+
+```{r}
+merged <- list()
+merged.ts <- list()
+for (i in unique(sales["Dept"])$Dept) {
+  merged[[i]] <- merge(sales.by.depart[[i]], features, by="Date")
+  merged.ts[[i]] <- ts(merged[[i]], start=c(2010, 6), frequency=52)
+}
+```
+
+```{r}
+tr <- list() #Training data per department
+ts <- list() #Testing data per department
+tr.ts <- list()
+ts.ts <- list()
+for (i in unique(sales["Dept"])$Dept) {
+  ratio <- 0.9
+  N <- length(merged[[1]][,1])
+  T <- floor(ratio * N)
+  S <- N - T
+  tr[[i]] <- head(merged[[i]], T)
+  ts[[i]] <- tail(merged[[i]], S)
+  tr.ts[[i]] <- head(merged.ts[[i]], T)
+  ts.ts[[i]] <- tail(merged.ts[[i]], S)
+}
+```
+
+```{r}
+#na.omit(merged[[1]])
+#merged[[1]]
+linear_models <- list()
+for (i in unique(sales["Dept"])$Dept) {
+    linear_models[[i]] <- tslm(Weekly_Sales ~ trend+ season +as.vector(Temperature) + Fuel_Price + CPI + Unemployment + IsHoliday, tr.ts[[i]])
+}
+```
+
+```{r}
+features.f.df <- as.data.frame(features[seq(144,151),]) # Features for prediction
+features.f.lm <- features.f.df
+features.f.lm$IsHoliday <- as.numeric(features.f.lm$IsHoliday)
+```
+
+
+```{r}
+arima_models <- list()
+for (i in unique(sales["Dept"])$Dept) {
+  if (i == 47 || i == 77 || i == 78 || i == 95) {
+    arima_models[[i]] <- NULL
+  }
+  else {
+    arima_models[[i]] <- auto.arima(y=tr[[i]]$Weekly_Sales, xreg=cbind(tr[[i]]$Temperature, tr[[i]]$Fuel_Price, tr[[i]]$CPI, tr[[i]]$Unemployment, tr[[i]]$IsHoliday), lambda="auto")
+  }  
+}
+```
+```{r}
+suppressWarnings(RMSE(forecast(arima_models[[1]], xreg=as.matrix(subset(ts[[1]], select=c(Temperature, Fuel_Price, CPI, Unemployment, IsHoliday))))$mean - ts[[1]]$Weekly_Sales))
+
+
+suppressWarnings(RMSE(forecast(linear_models[[1]], newdata=ts.ts[[1]])$mean - ts.ts[[1]][,4]))
+
+```
+
+```{r}
+ets_models = list()
+for (i in unique(sales["Dept"])$Dept) {
+  ets_models[[i]] <- ets(tr[[i]]$Weekly_Sales, model="ZZZ", damped = NULL)
+}
+
+
+```
+
+```{r}
+suppressWarnings(lin.rmse <- list())
+suppressWarnings(arima.rmse <- list())
+suppressWarnings(ets.rmse <- list())
+suppressWarnings(
+for (i in unique(sales["Dept"])$Dept) {
+  if (i != 47 && i != 77 && i != 78 && i != 95) {
+    arima.rmse[[i]] <- RMSE(forecast(arima_models[[i]], xreg=as.matrix(subset(ts[[i]], select=c(Temperature, Fuel_Price, CPI, Unemployment, IsHoliday))))$mean - ts[[i]]$Weekly_Sales)
+    
+  } else {
+    arima.rmse[[i]] <- 100000
+  
+  }
+  if(i != 47 && i != 51 && i != 77 && i != 78 && i != 99) {
+    lin.rmse[[i]] <- RMSE(forecast(linear_models[[i]], newdata=ts.ts[[i]])$mean - ts.ts[[i]][,4])
+  } else {
+    lin.rmse[[i]] <- 100000
+  }
+  ets.rmse[[i]] <- RMSE(forecast(ets_models[[i]], h=length(ts[[i]][,1]))$mean- ts[[i]]$Weekly_Sales)
+}
+)
+```
+
+
+
+```{r}
+
+RMSE_df <- cbind(lin.rmse, arima.rmse, ets.rmse)
+colnames(RMSE_df) <- c("RMSE Linear", "RMSE Arima", "RMSE ETS")
+head(RMSE_df,5)
+```
+
+```{r}
+lin.count <- 0
+arima.count <- 0
+ets.count <- 0
+final.pred <- list()
+
+suppressWarnings(
+for (i in unique(sales["Dept"])$Dept) {
+  if (which.min(RMSE_df[i,]) == 1) { 
+    final.pred[[i]] <- forecast(linear_models[[i]], newdata=features.f.lm)$mean
+    lin.count = lin.count + 1
+  }
+  else if (which.min(RMSE_df[i,]) == 2) {
+    final.pred[[i]] <- forecast(arima_models[[i]], xreg=as.matrix(subset(features.f.df, select=c(-Date))))$mean
+    arima.count = arima.count + 1
+  } 
+  else {
+    final.pred[[i]] <- forecast(ets_models[[i]], h=8)$mean
+    ets.count = ets.count + 1
+  }
+}
+)
+```
+
+
+```{r}
+lin.count
+arima.count
+ets.count
+```
+
+```{r}
+RMSE_df <- cbind(RMSE_df, final.pred)
+head(RMSE_df, 12)
+```
+
+```{r}
+plot_list <- list()
+for (i in unique(sales["Dept"])$Dept) {
+  plot_list[[i]]<- autoplot(ts(subset(merged[[i]], select=c(Weekly_Sales)), start=c(2010, 6), frequency=52), xlab="Time", ylab="Weekly Sales", main=paste("Department", i)) + 
+                            autolayer(ts(RMSE_df[i,]$final.pred, start = end(ts(subset(merged[[i]], select=c(Weekly_Sales)), 
+                            start=c(2010, 6), frequency=52)) + c(0,1), frequency=52), series="Prediction")
+}
+```
+
+```{r}
+plot_list[[92]]
+```
+
+```{r}
+table_final <- rbind()
+for (i in unique(sales["Dept"])$Dept) {
+  row_i <- cbind()
+  for(j in seq(1:8)) {
+   row_i <- cbind(row_i, RMSE_df[,4][[i]][j])
+  }
+  table_final <- rbind(table_final, row_i)
+}
+colnames(table_final) <- c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6", "Week 7", "Week 8") 
+rownames(table_final) <- as.vector(unique(sales["Dept"])$Dept)
+#head(table_final, 5)
+
+```
+
+
+
+
+```{r}
+table_final <- rbind(table_final, colSums(table_final))
+rownames(table_final)[nrow(table_final)] <- "Total"
+#table_final
+```
+
+
+
+
+```{r}
+table_final_1 <- rbind(head(table_final,5), tail(table_final,1))
+print(table_final_1, row.names = FALSE)
+```
+
+ETS Dataframe
+
+```{r}
+final.pred.ets <- list()
+
+for (i in unique(sales["Dept"])$Dept) {
+  if (!is.null(ets_models[[i]])) { 
+    final.pred.ets[[i]] <- forecast(ets_models[[i]], h=8)$mean
+  } else {
+    final.pred.ets[[i]] <- NA
+  }
+}
+
+```
+
+
+```{r}
+RMSE_df_ets <- cbind(RMSE_df, final.pred.ets)
+head(RMSE_df_ets, 12)
+```
+
+
+```{r}
+table_final_ets <- rbind()
+for (i in unique(sales["Dept"])$Dept) {
+  row_i <- cbind()
+  for(j in seq(1:8)) {
+   row_i <- cbind(row_i, RMSE_df_ets[,5][[i]][j])
+  }
+  table_final_ets <- rbind(table_final_ets, row_i)
+}
+colnames(table_final_ets) <- c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6", "Week 7", "Week 8") 
+rownames(table_final_ets) <- as.vector(unique(sales["Dept"])$Dept)
+#head(table_final_ets, 5)
+```
+
+
+```{r}
+table_final_ets <- rbind(table_final_ets, colSums(table_final_ets))
+rownames(table_final_ets)[nrow(table_final_ets)] <- "Total"
+table_final_ets<- rbind(head(table_final_ets,5), tail(table_final_ets,1))
+table_final_ets
+```
+
+
+Next I am gonna do only ARIMA Forecasts
+
+```{r}
+final.pred.arima <- list()
+
+for (i in unique(sales["Dept"])$Dept) {
+  if (!is.null(arima_models[[i]])) { 
+    final.pred.arima[[i]] <- forecast(arima_models[[i]], xreg=cbind(features.f.df$Temperature, features.f.df$Fuel_Price, features.f.df$CPI, features.f.df$Unemployment, features.f.df$IsHoliday), h=8)$mean
+  } else {
+    final.pred.arima[[i]] <- NA
+  }
+}
+
+```
+
+```{r}
+RMSE_df_arima <- cbind(RMSE_df_ets, final.pred.arima)
+head(RMSE_df_arima, 12)
+```
+
+
+
+```{r}
+table_final_arima <- rbind()
+for (i in unique(sales["Dept"])$Dept) {
+  row_i <- cbind()
+  for(j in seq(1:8)) {
+   row_i <- cbind(row_i, RMSE_df_arima[,6][[i]][j])
+  }
+  table_final_arima <- rbind(table_final_arima, row_i)
+}
+```
+
+
+```{r}
+colnames(table_final_arima) <- c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6", "Week 7", "Week 8") 
+rownames(table_final_arima) <- as.vector(unique(sales["Dept"])$Dept)
+
+#table_final_arima
+```
+
+
+
+```{r}
+mean_val <- mean(table_final_arima, na.rm = TRUE)
+table_final_arima[is.na(table_final_arima)] <- mean_val
+table_final_ar <- rbind(table_final_arima, colSums(table_final_arima))
+table_final_ar1<- rbind(head(table_final_ar,5), tail(table_final_ar,1))
+table_final_ar1
+```
+
+```{r}
+rownames(table_final_ar1) <- c(1,2,3,4,5,'Total')
+table_final_ar1
+```
+
+Now i finally do the Linear models
+
+```{r}
+final.pred.linear <- list()
+suppressWarnings(
+for (i in unique(sales["Dept"])$Dept) {
+  if (i != 47 && i != 51 && i != 77 && i != 78 && i != 99) {
+    if (!is.null(linear_models[[i]])) { 
+      final.pred.linear[[i]] <- forecast(linear_models[[i]], newdata=features.f.lm)$mean
+    }
+    else {
+      final.pred.linear[[i]] <- NA
+    }
+  }
+}
+)
+```
+
+
+```{r}
+RMSE_df_lin <- cbind(RMSE_df, final.pred.linear)
+head(RMSE_df_lin, 12)
+```
+
+
+```{r}
+table_final_lin <- rbind()
+for (i in unique(sales["Dept"])$Dept) {
+  row_i <- cbind()
+  for(j in seq(1:8)) {
+   row_i <- cbind(row_i, RMSE_df_lin[,4][[i]][j])
+  }
+  table_final_lin <- rbind(table_final_lin, row_i)
+}
+```
+
+
+```{r}
+colnames(table_final_lin) <- c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6", "Week 7", "Week 8") 
+rownames(table_final_lin) <- setdiff(unique(sales["Dept"])$Dept, c(47, 51, 77, 78))
+
+ 
+table_final_lin
+```
+
+
+```{r}
+length(unique(sales["Dept"])$Dept)
+```
+
+```{r}
+nrow(table_final_lin)
+```
+
+
+```{r}
+table_final_lin1 <- rbind(table_final_lin, colSums(table_final_lin))
+table_final_lin1<- rbind(head(table_final_lin1,5), tail(table_final_lin1,1))
+rownames(table_final_lin1) <- c(1,2,3,4,5,'Total')
+colnames(table_final_lin1) <- c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6", "Week 7", "Week 8")
+table_final_lin1
+```
+
+
+
+
+
+
